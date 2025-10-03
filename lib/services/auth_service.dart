@@ -44,7 +44,7 @@ class AuthService {
     final userData = {
       'uid': firebaseUser.uid,
       'email': firebaseUser.email,
-      'createdAt': DateTime.now().toIso8601String(),
+      'created_at': DateTime.now().toIso8601String(),
     };
 
     await _supabaseService.client.from('users').upsert(userData);

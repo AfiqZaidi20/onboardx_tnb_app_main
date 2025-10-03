@@ -13,6 +13,7 @@ import 'package:onboardx_tnb_app_main/screens/setting/setting_screen.dart';
 import 'package:onboardx_tnb_app_main/screens/taskmanager/task_manager_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:onboardx_tnb_app_main/services/supabase_service.dart';
+import 'package:onboardx_tnb_app_main/screens/setting/manage_your_account_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -31,15 +32,17 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> _projects = [];
 
   // List of screens for each tab
-  final List<Widget> _screens = [
-    const HomeContent(), // Home tab
-    const ScanQrScreen(), // QR Code Scanner tab
-    const SettingScreen(), // Settings tab
-  ];
+  late final List<Widget> _screens;
 
   @override
   void initState() {
     super.initState();
+    _screens = [
+      const HomeContent(), // Home tab
+      const ScanQrScreen(), // QR Code Scanner tab
+      const SettingScreen(), // Settings tab
+    ];
+
     _loadUserData();
     _loadProjects();
 
@@ -56,59 +59,89 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // Combined function to load user data from both Firestore and Supabase
   Future<void> _loadUserData() async {
     try {
-      User? user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        // Load from Firestore first
-        DocumentSnapshot userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get();
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
 
-        Map<String, dynamic>? userData;
-        
-        if (userDoc.exists) {
-          userData = userDoc.data() as Map<String, dynamic>?;
-        }
+      // Try Firestore first (existing data)
+      DocumentSnapshot userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
 
-        // Then load from Supabase and merge
-        final supabaseData = await _supabaseService.getUser(user.uid);
-        
-        if (!mounted) return;
-        
-        if (supabaseData != null && supabaseData is Map<String, dynamic>) {
-          // Process profile image URL if exists
-          String? profileImageUrl;
-          if (supabaseData['profile_image'] != null && supabaseData['profile_image'].isNotEmpty) {
-            profileImageUrl = _supabaseService.getPublicUrl('profiles', supabaseData['profile_image']) as String?;
-          }
+      Map<String, dynamic>? userData;
+      if (userDoc.exists) {
+        userData = userDoc.data() as Map<String, dynamic>?;
+      }
 
-          // Merge data: Supabase data will override Firestore data for same fields
-          setState(() {
-            _userData = {
-              ...?userData,
-              // Transform Supabase snake_case to camelCase to match Firestore field names
-              'fullName': supabaseData['full_name'] ?? userData?['fullName'],
-              'email': supabaseData['email'] ?? userData?['email'],
-              'phoneNumber': supabaseData['phone_number'] ?? userData?['phoneNumber'],
-              'workUnit': supabaseData['work_unit'] ?? userData?['workUnit'],
-              'workplace': supabaseData['work_place'] ?? userData?['workplace'],
-              'workType': supabaseData['work_type'] ?? userData?['workType'],
-              'username': supabaseData['username'] ?? userData?['username'],
-              'profileImageUrl': profileImageUrl, // Add profile image URL
-            };
-          });
-        } else if (userData != null) {
-          // If no Supabase data, use Firestore data
-          setState(() {
-            _userData = userData;
-          });
+      // Then try Supabase: first try getUserProfile (manage screen style), then fallback to getUser
+      Map<String, dynamic>? supabaseData;
+      try {
+        supabaseData = await _supabaseService.getUserProfile(user.uid);
+      } catch (_) {
+        try {
+          supabaseData = await _supabaseService.getUser(user.uid);
+        } catch (e) {
+          // ignore - handled below
+          print('Supabase get user failed: $e');
         }
       }
+
+      if (!mounted) return;
+
+      String? profileImageUrl;
+
+      // If supabaseData found, normalize fields and compute public URL when necessary
+      if (supabaseData != null && supabaseData is Map<String, dynamic>) {
+        // Supabase may store profile image as 'profile_image' (path) or 'profile_image_url'
+        final imagePath = supabaseData['profile_image'] ?? supabaseData['profile_image_path'];
+        final imageUrlField = supabaseData['profile_image_url'] ?? supabaseData['profile_image_url'];
+
+        if (imageUrlField != null && (imageUrlField as String).isNotEmpty) {
+          profileImageUrl = imageUrlField as String;
+        } else if (imagePath != null && (imagePath as String).isNotEmpty) {
+          // Use same bucket name as manage_your_account_screen.dart: 'profile-images'
+          try {
+            final publicUrl = _supabaseService.getPublicUrl('profile-images', imagePath);
+            if (publicUrl is String && publicUrl.isNotEmpty) profileImageUrl = publicUrl;
+          } catch (e) {
+            print('Error building public URL from Supabase: $e');
+          }
+        }
+      }
+
+      // If still null, try Firestore's profileImageUrl
+      if (profileImageUrl == null && userData != null) {
+        final firestoreImage = userData['profileImageUrl'] as String?;
+        if (firestoreImage != null && firestoreImage.isNotEmpty) {
+          profileImageUrl = firestoreImage;
+        }
+      }
+
+      // Merge data: supabase (if present) overrides firestore
+      final merged = <String, dynamic>{};
+      if (userData != null) merged.addAll(userData);
+      if (supabaseData != null) {
+        // Convert snake_case => camelCase where applicable
+        merged['fullName'] = supabaseData['full_name'] ?? merged['fullName'];
+        merged['email'] = supabaseData['email'] ?? merged['email'];
+        merged['phoneNumber'] = supabaseData['phone_number'] ?? merged['phoneNumber'];
+        merged['workUnit'] = supabaseData['work_unit'] ?? merged['workUnit'];
+        merged['workplace'] = supabaseData['work_place'] ?? merged['workplace'];
+        merged['workType'] = supabaseData['work_type'] ?? merged['workType'];
+        merged['username'] = supabaseData['username'] ?? merged['username'];
+      }
+
+      if (profileImageUrl != null) merged['profileImageUrl'] = profileImageUrl;
+
+      setState(() {
+        _userData = merged;
+      });
+
+      print('Loaded user data in HomeScreen: $_userData');
     } catch (e) {
-      print("Error loading user data: $e");
+      print('Error loading user data in HomeScreen: $e');
     }
   }
 
@@ -117,9 +150,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final projectsData = await _supabaseService.getProjects();
       if (!mounted) return;
       if (projectsData != null && projectsData is List<Map<String, dynamic>>) {
-        setState(() {
-          _projects = projectsData;
-        });
+        setState(() => _projects = projectsData);
       } else if (projectsData != null && projectsData is List) {
         setState(() {
           _projects = projectsData.map<Map<String, dynamic>>((e) {
@@ -129,7 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     } catch (e) {
-      print("Error loading Supabase projects: $e");
+      print('Error loading Supabase projects: $e');
     }
   }
 
@@ -147,7 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _isCheckingVerification = false;
       });
     } catch (e) {
-      print("Error checking email verification: $e");
+      print('Error checking email verification: $e');
       if (!mounted) return;
       setState(() {
         _isCheckingVerification = false;
@@ -221,7 +252,7 @@ class _HomeScreenState extends State<HomeScreen> {
         MaterialPageRoute(builder: (context) => const LoginScreen()),
       );
     } catch (e) {
-      print("Error signing out: $e");
+      print('Error signing out: $e');
     }
   }
 
@@ -285,7 +316,7 @@ class _HomeContentState extends State<HomeContent> {
   bool _isHeaderExpanded = false;
   Map<String, dynamic>? _userData;
   Color? primaryColor;
-  
+
   // Add SupabaseService
   final SupabaseService _supabaseService = SupabaseService();
 
@@ -298,60 +329,77 @@ class _HomeContentState extends State<HomeContent> {
   // Combined function to load user data from both sources
   Future<void> _loadUserData() async {
     try {
-      User? user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        // Load from Firestore first
-        DocumentSnapshot userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .get();
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
 
-        Map<String, dynamic>? userData;
-        
-        if (userDoc.exists) {
-          userData = userDoc.data() as Map<String, dynamic>?;
+      // Load from Firestore first
+      DocumentSnapshot userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+
+      Map<String, dynamic>? userData;
+      if (userDoc.exists) userData = userDoc.data() as Map<String, dynamic>?;
+
+      // Then load from Supabase and merge
+      Map<String, dynamic>? supabaseData;
+      try {
+        supabaseData = await _supabaseService.getUserProfile(user.uid);
+      } catch (_) {
+        try {
+          supabaseData = await _supabaseService.getUser(user.uid);
+        } catch (e) {
+          print('Supabase get user failed in HomeContent: $e');
         }
-
-        // Then load from Supabase and merge
-        final supabaseData = await _supabaseService.getUser(user.uid);
-        
-        if (!mounted) return;
-        
-        if (supabaseData != null && supabaseData is Map<String, dynamic>) {
-          // Process profile image URL if exists
-          String? profileImageUrl;
-          if (supabaseData['profile_image'] != null && supabaseData['profile_image'].isNotEmpty) {
-            profileImageUrl = _supabaseService.getPublicUrl('profiles', supabaseData['profile_image']) as String?;
-          }
-
-          // Merge data: Supabase data will override Firestore data for same fields
-          setState(() {
-            _userData = {
-              ...?userData,
-              // Transform Supabase snake_case to camelCase to match Firestore field names
-              'fullName': supabaseData['full_name'] ?? userData?['fullName'],
-              'email': supabaseData['email'] ?? userData?['email'],
-              'phoneNumber': supabaseData['phone_number'] ?? userData?['phoneNumber'],
-              'workUnit': supabaseData['work_unit'] ?? userData?['workUnit'],
-              'workplace': supabaseData['work_place'] ?? userData?['workplace'],
-              'workType': supabaseData['work_type'] ?? userData?['workType'],
-              'username': supabaseData['username'] ?? userData?['username'],
-              'profileImageUrl': profileImageUrl, // Add profile image URL
-            };
-          });
-        } else if (userData != null) {
-          // If no Supabase data, use Firestore data
-          setState(() {
-            _userData = userData;
-          });
-        }
-        
-        // Print for debugging
-        print("Loaded user data: $_userData");
-        print("Profile image URL: ${_userData?['profileImageUrl']}");
       }
+
+      if (!mounted) return;
+
+      String? profileImageUrl;
+
+      if (supabaseData != null && supabaseData is Map<String, dynamic>) {
+        final imagePath = supabaseData['profile_image'] ?? supabaseData['profile_image_path'];
+        final imageUrlField = supabaseData['profile_image_url'] ?? supabaseData['profile_image_url'];
+
+        if (imageUrlField != null && (imageUrlField as String).isNotEmpty) {
+          profileImageUrl = imageUrlField as String;
+        } else if (imagePath != null && (imagePath as String).isNotEmpty) {
+          try {
+            final publicUrl = _supabaseService.getPublicUrl('profile-images', imagePath);
+            if (publicUrl is String && publicUrl.isNotEmpty) profileImageUrl = publicUrl;
+          } catch (e) {
+            print('Error building public URL from Supabase in HomeContent: $e');
+          }
+        }
+      }
+
+      // If still null, try Firestore's profileImageUrl
+      if (profileImageUrl == null && userData != null) {
+        final firestoreImage = userData['profileImageUrl'] as String?;
+        if (firestoreImage != null && firestoreImage.isNotEmpty) profileImageUrl = firestoreImage;
+      }
+
+      final merged = <String, dynamic>{};
+      if (userData != null) merged.addAll(userData);
+      if (supabaseData != null) {
+        merged['fullName'] = supabaseData['full_name'] ?? merged['fullName'];
+        merged['email'] = supabaseData['email'] ?? merged['email'];
+        merged['phoneNumber'] = supabaseData['phone_number'] ?? merged['phoneNumber'];
+        merged['workUnit'] = supabaseData['work_unit'] ?? merged['workUnit'];
+        merged['workplace'] = supabaseData['work_place'] ?? merged['workplace'];
+        merged['workType'] = supabaseData['work_type'] ?? merged['workType'];
+        merged['username'] = supabaseData['username'] ?? merged['username'];
+      }
+      if (profileImageUrl != null) merged['profileImageUrl'] = profileImageUrl;
+
+      setState(() {
+        _userData = merged;
+      });
+
+      print('Loaded user data: $_userData');
+      print('Profile image URL: ${_userData?['profileImageUrl']}');
     } catch (e) {
-      print("Error loading user data in HomeContent: $e");
+      print('Error loading user data in HomeContent: $e');
     }
   }
 
@@ -364,7 +412,7 @@ class _HomeContentState extends State<HomeContent> {
         MaterialPageRoute(builder: (context) => const LoginScreen()),
       );
     } catch (e) {
-      print("Error signing out: $e");
+      print('Error signing out: $e');
     }
   }
 
@@ -463,7 +511,20 @@ class _HomeContentState extends State<HomeContent> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       // CircleAvatar dengan profile image dari Supabase
-                      _buildProfileAvatar(radius: 40, iconSize: 40),
+                      GestureDetector(
+                        onTap: () {
+                          // Open Manage Account screen to view/edit profile
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ManageAccountScreen(
+                                user: _userData ?? <String, dynamic>{},
+                              ),
+                            ),
+                          );
+                        },
+                        child: _buildProfileAvatar(radius: 40, iconSize: 40),
+                      ),
                       const SizedBox(height: 20),
                       _buildDetailRow(
                           Icons.person, _userData?['fullName'] ?? "Loading..."),
@@ -504,7 +565,20 @@ class _HomeContentState extends State<HomeContent> {
                   Row(
                     children: [
                       // CircleAvatar dengan profile image dari Supabase (small version)
-                      _buildProfileAvatar(radius: 30, iconSize: 30),
+                      GestureDetector(
+                        onTap: () {
+                          // Open Manage Account screen to view/edit profile
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ManageAccountScreen(
+                                user: _userData ?? <String, dynamic>{},
+                              ),
+                            ),
+                          );
+                        },
+                        child: _buildProfileAvatar(radius: 30, iconSize: 30),
+                      ),
                       const SizedBox(width: 15),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -514,7 +588,7 @@ class _HomeContentState extends State<HomeContent> {
                             style: TextStyle(fontSize: 18, color: Colors.white),
                           ),
                           Text(
-                            _userData?['username'] ?? "Loading...",
+                            _userData?['username'] ?? _userData?['fullName'] ?? "Loading...",
                             style: const TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.bold,
@@ -544,17 +618,16 @@ class _HomeContentState extends State<HomeContent> {
 
   // Widget untuk CircleAvatar dengan profile image
   Widget _buildProfileAvatar({required double radius, required double iconSize}) {
-    final String? profileImageUrl = _userData?['profileImageUrl'];
-    
+    final String? profileImageUrl = _userData?['profileImageUrl'] as String?;
+
     if (profileImageUrl != null && profileImageUrl.isNotEmpty) {
-      // Jika ada profile image URL, tampilkan NetworkImage
       return CircleAvatar(
         radius: radius,
         backgroundColor: Colors.white,
         backgroundImage: NetworkImage(profileImageUrl),
         onBackgroundImageError: (exception, stackTrace) {
           // Fallback ke icon jika image gagal load
-          print("Error loading profile image: $exception");
+          print('Error loading profile image: $exception');
         },
       );
     } else {
@@ -574,14 +647,16 @@ class _HomeContentState extends State<HomeContent> {
       children: [
         Icon(icon, color: Colors.white, size: 20),
         const SizedBox(width: 10),
-        Text(
-          text,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 16,
+        Flexible(
+          child: Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+            ),
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis,
           ),
-          textAlign: TextAlign.center,
-          overflow: TextOverflow.ellipsis,
         ),
       ],
     );
@@ -714,7 +789,7 @@ class _HomeContentState extends State<HomeContent> {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => const TimelineScreen(),
+              builder: (context) => const MeetTheTeamScreen(),
             ),
           );
         }
@@ -738,7 +813,7 @@ class _HomeContentState extends State<HomeContent> {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => const TimelineScreen(),
+              builder: (context) => const MeetTheTeamScreen(),
             ),
           );
         }
@@ -858,7 +933,6 @@ class _HomeContentState extends State<HomeContent> {
         'image': 'assets/images/background_news.jpeg',
         'url': 'https://finance.yahoo.com/quote/5347.KL/news/',
       },
-      // Add more news items as needed
     ];
 
     return Column(
